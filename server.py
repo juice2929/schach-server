@@ -2,8 +2,7 @@ import asyncio
 import json
 import websockets
 
-ROOMS = {}  # room_code -> Liste von websockets
-
+ROOMS = {}
 
 async def handler(websocket):
     current_room = None
@@ -15,34 +14,18 @@ async def handler(websocket):
                     current_room = str(data["room"])
                     if current_room not in ROOMS:
                         ROOMS[current_room] = []
-
                     if websocket not in ROOMS[current_room]:
                         ROOMS[current_room].append(websocket)
-
-                    print(
-                        f"Spieler in Raum '{current_room}'. Gesamt: {len(ROOMS[current_room])}"
-                    )
-
-                    # WICHTIG: Wenn 2 Spieler im Raum sind, sende 'start' / Raum-Bestätigung an BEIDE!
+                    
+                    # Wenn 2 Spieler da sind, benachrichtige sie, aber ohne das Spiel-Format zu stören
                     if len(ROOMS[current_room]) >= 2:
                         for client in ROOMS[current_room]:
-                            await client.send(
-                                json.dumps(
-                                    {"status": "start", "room": current_room}
-                                )
-                            )
-                    else:
-                        # Bestätigung für den 1. Spieler
-                        await websocket.send(
-                            json.dumps(
-                                {"status": "waiting", "room": current_room}
-                            )
-                        )
+                            await client.send(json.dumps({"action": "start", "room": current_room}))
                     continue
             except Exception:
                 pass
 
-            # Leite alle anderen Nachrichten (Züge, Chat) an den jeweils anderen Spieler weiter
+            # Leite normale Züge/Nachrichten an den Partner weiter
             if current_room and current_room in ROOMS:
                 for client in ROOMS[current_room]:
                     if client != websocket:
@@ -55,11 +38,9 @@ async def handler(websocket):
             if websocket in ROOMS[current_room]:
                 ROOMS[current_room].remove(websocket)
 
-
 async def main():
     async with websockets.serve(handler, "0.0.0.0", 10000):
         await asyncio.Future()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
