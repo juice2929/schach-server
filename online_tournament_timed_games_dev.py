@@ -72,6 +72,8 @@ class TimedTournamentGames(VerifiedTournamentGames):
             raise ValueError('Partie ist bereits beendet.')
         clock = self._clock(match_id)
         now = self.clocks.now()
+        if clock is not None and clock.paused and action != 'resign':
+            raise ValueError('Schachuhr ist pausiert.')
         if clock is not None:
             outcome = self._flag(match, clock, now)
             if outcome is not None:

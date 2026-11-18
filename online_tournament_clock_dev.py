@@ -27,6 +27,7 @@ class MatchClock:
         self._active = 0 if self.minutes else None  # white=0, black=1
         self._last_ns = self.started_ns
         self._expired = None
+        self._paused_side = None
         self._stopped = not bool(self.minutes)
 
     def _elapsed(self, now):
@@ -60,13 +61,36 @@ class MatchClock:
                 'active': None if expired or self._active is None else ('white', 'black')[self._active],
                 'expired': expired}
 
+    @property
+    def paused(self):
+        return self._paused_side is not None
+
+    def pause(self, now):
+        """Freeze at server detection time, without restoring spent time."""
+        if self._stopped or self.paused or self.expired_side(now) is not None:
+            return False
+        self._remaining = self._view(now)
+        self._last_ns = now
+        self._paused_side = self._active
+        self._active = None
+        return True
+
+    def resume(self, now):
+        if not self.paused or self._stopped:
+            return False
+        self._elapsed(now)
+        self._last_ns = now
+        self._active = self._paused_side
+        self._paused_side = None
+        return True
+
     def accept_move(self, side, now):
         """Call only AFTER chess legality is verified, using the server receipt time."""
         if side not in ('white', 'black'):
             raise ValueError('Ungültige Zugfarbe.')
         if not self.minutes:
             return
-        if self._stopped or self.expired_side(now) is not None:
+        if self._stopped or self.paused or self.expired_side(now) is not None:
             raise ValueError('Schachuhr ist abgelaufen oder beendet.')
         if side != ('white', 'black')[self._active]:
             raise ValueError('Falsche Zugfarbe für die Schachuhr.')
@@ -82,6 +106,7 @@ class MatchClock:
         self._remaining = self._view(now)
         self._last_ns = now
         self._active = None
+        self._paused_side = None
         self._stopped = True
 
 
