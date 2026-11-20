@@ -17,7 +17,6 @@ from online_tournament_ws_dev import normalize_code
 LOG = logging.getLogger('tournament.reliability')
 PAUSE_NS = 120 * 1_000_000_000
 SEND_TIMEOUT = 2
-PROBE_TIMEOUT = 2
 QUEUE_LIMIT = 64
 
 
@@ -28,6 +27,7 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
         self.budgets = {}  # (room, match) -> unused ns; shared across draw replays
         self.pauses = {}  # (room, match) -> (clock object, start_ns)
         self.outboxes = {}
+        self.retired = set()  # superseded sockets; reject their queued actions
 
     @staticmethod
     def _abort(ws):
@@ -56,6 +56,7 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
             self.outboxes.pop(ws, None)
             writer.cancel()
             await asyncio.gather(writer, return_exceptions=True)
+            self.retired.discard(ws)
 
     async def send(self, ws, payload):
         # Snapshot at enqueue time, preserve per-socket ordering, never await I/O
@@ -139,9 +140,10 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
                     mapping.pop(key, None)
 
     async def _resume(self, ws, data):
-        # A valid token alone must not displace a responsive connection.
-        # Validate before probing or changing any seat. The inherited method
-        # repeats all validation and generates the original resume response.
+        # A valid private token authenticates a replacement connection. A
+        # transport-level pong does not demonstrate that the old application
+        # is still usable (e.g. a proxy can keep that transport alive).
+        # process holds dispatch; validation precedes any mutation.
         code = normalize_code(data.get('code'))
         pid, token = data.get('player_id'), data.get('token')
         valid_format = (isinstance(pid, str) and len(pid) == 32 and
@@ -156,25 +158,22 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
             if (room is not None and room.started and pid in room.players and
                     old is not None and old is not ws and expected is not None and
                     hmac.compare_digest(expected, self._proof(token))):
-                try:
-                    async with asyncio.timeout(PROBE_TIMEOUT):
-                        pong = await old.ping()
-                        await asyncio.shield(pong)
-                except (OSError, TimeoutError, websockets.exceptions.WebSocketException):
-                    # Retire exactly this socket. Its eventual disconnect is a
-                    # no-op and cannot remove the new authenticated connection.
-                    self.members[code].pop(pid, None)
-                    self.membership.pop(old, None)
-                    self._abort(old)
-                    await self._sync_pauses()
-                    LOG.info('unresponsive authenticated seat recovered')
-                else:
-                    raise PermissionError('Spieler ist bereits verbunden.')
+                # Revoke authority BEFORE closing the old transport. Its
+                # queued actions and late disconnect cannot affect the seat.
+                # Do not create an artificial offline interval or reset clocks.
+                self.retired.add(old)
+                self.members[code].pop(pid, None)
+                self.membership.pop(old, None)
+                self.outboxes.pop(old, None)
+                self._abort(old)
+                LOG.info('authenticated seat replaced')
         await super()._resume(ws, data)
         LOG.info('resume accepted')
 
     async def process(self, ws, data):
         async with self.dispatch:
+            if ws in self.retired:
+                return
             await self._sync_pauses()
             # Same creation path as the timed adapter; call its parent so
             # the dispatch lock is not acquired twice.
