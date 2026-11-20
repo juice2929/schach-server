@@ -63,6 +63,16 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
         outbox = self.outboxes.get(ws)
         if outbox is None:
             return
+        if payload.get('action') == 'tournament_error':
+            reason = {'Spieler ist bereits verbunden.': 'seat_busy',
+                      'Wiederverbindung nicht zulässig.': 'resume_not_permitted',
+                      'Wiederverbindungsdaten ungültig.': 'invalid_credentials',
+                      'Ungültige Server-Spielerkennung.': 'invalid_player_id',
+                      'Partie ist bereits beendet.': 'match_finished',
+                      'Du bist nicht Mitglied dieses Turniers.': 'not_member',
+                      'Du spielst nicht in dieser Partie.': 'not_participant',
+                      'Du bist nicht am Zug.': 'not_turn'}.get(payload.get('message'), 'other')
+            LOG.info('protocol error (%s); registered=%s', reason, ws in self.membership)
         snapshot = payload.get('snapshot')
         if isinstance(snapshot, dict):
             minutes = self.minutes.get(snapshot.get('code'), 0)
@@ -194,7 +204,10 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
                         await self._publish_state(code, games, match, 'clock_paused', only=member[1])
                         return
             try:
-                return await ResumableVerifiedTournamentWebSocketService.process(self, ws, data)
+                result = await ResumableVerifiedTournamentWebSocketService.process(self, ws, data)
+                if isinstance(data, dict) and data.get('action') == 'tournament_resign':
+                    LOG.info('resign request processed')
+                return result
             finally:
                 await self._sync_pauses()
 
