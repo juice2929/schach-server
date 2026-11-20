@@ -16,7 +16,7 @@ async def handler(websocket):
                         ROOMS[current_room] = []
                     if websocket not in ROOMS[current_room]:
                         ROOMS[current_room].append(websocket)
-                    
+
                     # Wenn 2 Spieler da sind, benachrichtige sie, aber ohne das Spiel-Format zu stören
                     if len(ROOMS[current_room]) >= 2:
                         for client in ROOMS[current_room]:
@@ -39,8 +39,8 @@ async def handler(websocket):
                 ROOMS[current_room].remove(websocket)
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 10000):
-        await asyncio.Future()
+    from normal_dual_server import serve_combined
+    await serve_combined(handler)
 
 if __name__ == "__main__":
     asyncio.run(main())
