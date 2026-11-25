@@ -20,6 +20,7 @@ class TimedTournamentWebSocketService(ResumableVerifiedTournamentWebSocketServic
 
     async def process(self, ws, data):
         async with self.dispatch:
+            await self._expire_lobby_reservations()
             if isinstance(data, dict) and data.get('action') == 'tournament_create':
                 code = normalize_code(data.get('code'))
                 minutes = validate_minutes(data.get('time_minutes', 0))
@@ -31,6 +32,14 @@ class TimedTournamentWebSocketService(ResumableVerifiedTournamentWebSocketServic
                         if code not in self.rooms:
                             self.minutes.pop(code, None)
             return await super().process(ws, data)
+
+    def _forget_lobby(self, code):
+        super()._forget_lobby(code)
+        self.minutes.pop(code, None)
+
+    async def expire_lobby_reservations(self, now=None):
+        async with self.dispatch:
+            await self._expire_lobby_reservations(now)
 
     async def disconnect(self, ws):
         async with self.dispatch:
@@ -71,6 +80,7 @@ class TimedTournamentWebSocketService(ResumableVerifiedTournamentWebSocketServic
         draw_replays distinguishes successive games of the same pairing.
         """
         async with self.dispatch:
+            await self._expire_lobby_reservations()
             packets = []
             async with self.lock:
                 for code, games in list(self.verified_games.items()):
