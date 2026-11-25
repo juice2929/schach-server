@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 
@@ -7,9 +8,13 @@ from online_tournament_ws_clock_dev import TimedTournamentWebSocketService
 class MockSocket:
     def __init__(self):
         self.messages = []
+        self.closed = False
 
     async def send(self, raw):
         self.messages.append(json.loads(raw))
+
+    async def close(self, code=1000, reason=''):
+        self.closed = True
 
     def packet(self, action):
         return next(
@@ -147,6 +152,106 @@ class LobbyReconnectTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(self.code, self.svc.rooms)
         self.assertNotIn(self.code, self.svc.minutes)
+
+
+
+    async def replace_connection(self, pid, token):
+        ws = MockSocket()
+        await self.svc.process(ws, {
+            "action": "tournament_resume",
+            "code": self.code,
+            "player_id": pid,
+            "token": token,
+            "replace_connection": True
+        })
+
+        await asyncio.gather(
+            *tuple(self.svc._replaced_socket_tasks)
+        )
+        return ws
+
+    async def test_replace_active_host(self):
+        old, pid, token = await self.register("Host", host=True)
+
+        new = await self.replace_connection(pid, token)
+
+        self.assertTrue(old.closed)
+        self.assertNotIn(old, self.svc.membership)
+        self.assertIs(self.svc.members[self.code][pid], new)
+        self.assertEqual(self.svc.rooms[self.code].host_id, pid)
+        self.assertEqual(len(self.svc.rooms[self.code].players), 1)
+
+        reply = new.packet("tournament_resumed")
+        self.assertEqual(reply["snapshot"]["state"], "waiting")
+        self.assertEqual(reply["snapshot"]["time_minutes"], 5)
+
+        await self.svc.disconnect(old)
+
+        self.assertIn(self.code, self.svc.rooms)
+        self.assertIs(self.svc.members[self.code][pid], new)
+
+    async def test_replace_active_guest(self):
+        await self.register("Host", host=True)
+        old, pid, token = await self.register("Guest")
+
+        new = await self.replace_connection(pid, token)
+
+        self.assertTrue(old.closed)
+        self.assertIs(self.svc.members[self.code][pid], new)
+        self.assertEqual(len(self.svc.rooms[self.code].players), 2)
+
+        await self.svc.disconnect(old)
+        self.assertIs(self.svc.members[self.code][pid], new)
+
+    async def test_replace_wrong_token_rejected(self):
+        old, pid, token = await self.register("Host", host=True)
+
+        wrong = ("B" if token[0] == "A" else "A") + token[1:]
+
+        with self.assertRaises(PermissionError):
+            await self.replace_connection(pid, wrong)
+
+        self.assertFalse(old.closed)
+        self.assertIs(self.svc.members[self.code][pid], old)
+
+    async def test_replace_legacy_windows_rejected(self):
+        old, pid, token = await self.register(
+            "WindowsHost", host=True, mobile=False
+        )
+
+        with self.assertRaises(PermissionError):
+            await self.replace_connection(pid, token)
+
+        self.assertFalse(old.closed)
+        self.assertIs(self.svc.members[self.code][pid], old)
+
+    async def test_replace_without_request_rejected(self):
+        old, pid, token = await self.register("Host", host=True)
+
+        with self.assertRaises(PermissionError):
+            await self.resume(pid, token)
+
+        self.assertFalse(old.closed)
+        self.assertIs(self.svc.members[self.code][pid], old)
+
+    async def test_replace_running_tournament_rejected(self):
+        host, pid, token = await self.register("Host", host=True)
+
+        for name in ("Guest1", "Guest2", "Guest3"):
+            await self.register(name)
+
+        await self.svc.process(host, {
+            "action": "tournament_start",
+            "code": self.code
+        })
+
+        self.assertTrue(self.svc.rooms[self.code].started)
+
+        with self.assertRaises(PermissionError):
+            await self.replace_connection(pid, token)
+
+        self.assertFalse(host.closed)
+        self.assertIs(self.svc.members[self.code][pid], host)
 
 
 if __name__ == "__main__":

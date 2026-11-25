@@ -42,6 +42,7 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         super().__init__()
         self._lobby_resume_enabled = set()
         self._lobby_deadlines = {}
+        self._replaced_socket_tasks = set()
         self.lobby_grace_seconds = 120
         self._resume_proofs = {}  # (code, server-issued player_id) -> SHA-256(token)
 
@@ -78,6 +79,12 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         except websockets.exceptions.ConnectionClosed:
             pass
 
+    async def _close_replaced_socket(self, ws):
+        try:
+            await ws.close(code=1000, reason='Connection replaced')
+        except (websockets.exceptions.ConnectionClosed, OSError):
+            pass
+
     async def _resume(self, ws, data):
         code = normalize_code(data.get('code'))
         player_id = data.get('player_id')
@@ -105,12 +112,28 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
             proof = self._proof(token)
             if expected is None or not hmac.compare_digest(expected, proof):
                 raise PermissionError('Wiederverbindung nicht zulässig.')
-            if player_id in self.members[code]:
-                raise PermissionError('Spieler ist bereits verbunden.')
+            replaced_ws = self.members[code].get(player_id)
+
+            if replaced_ws is not None:
+                if (room.started
+                        or (code, player_id) not in self._lobby_resume_enabled
+                        or data.get('replace_connection') is not True):
+                    raise PermissionError('Spieler ist bereits verbunden.')
+
+                self.membership.pop(replaced_ws, None)
 
             self._lobby_deadlines.pop((code, player_id), None)
             self.members[code][player_id] = ws
             self.membership[ws] = (code, player_id)
+
+            if replaced_ws is not None:
+                task = asyncio.create_task(
+                    self._close_replaced_socket(replaced_ws)
+                )
+                self._replaced_socket_tasks.add(task)
+                task.add_done_callback(
+                    self._replaced_socket_tasks.discard
+                )
             # A recovering player only receives details for their own ready
             # games; all other players' private board states remain private.
             game_states = []
