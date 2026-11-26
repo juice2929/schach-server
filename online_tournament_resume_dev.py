@@ -43,7 +43,7 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         self._lobby_resume_enabled = set()
         self._lobby_deadlines = {}
         self._replaced_socket_tasks = set()
-        self.lobby_grace_seconds = 120
+        self.lobby_grace_seconds = 240
         self._resume_proofs = {}  # (code, server-issued player_id) -> SHA-256(token)
 
     @staticmethod
