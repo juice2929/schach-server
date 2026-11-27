@@ -174,6 +174,8 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
         async with self.dispatch:
             if ws in self.retired:
                 return
+            await self._expire_lobby_heartbeats()
+            await self._expire_lobby_reservations()
             await self._sync_pauses()
             # Same creation path as the timed adapter; call its parent so
             # the dispatch lock is not acquired twice.
@@ -224,6 +226,8 @@ class ReliableTournamentService(TimedTournamentWebSocketService):
         # Maintain the same packet order and clock protocol as the deployed
         # timed adapter. Pause/resume and flag checks share one dispatch gate.
         async with self.dispatch:
+            await self._expire_lobby_heartbeats()
+            await self._expire_lobby_reservations()
             await self._sync_pauses()
             packets = []
             async with self.lock:

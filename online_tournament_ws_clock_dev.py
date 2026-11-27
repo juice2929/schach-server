@@ -3,7 +3,7 @@ All operations run in one ordered dispatch gate; game mutations additionally
 use the inherited service lock. Intended only for localhost development.
 """
 import asyncio
-from time import monotonic_ns
+from time import monotonic, monotonic_ns
 import websockets
 from online_tournament_resume_dev import ResumableVerifiedTournamentWebSocketService
 from online_tournament_timed_games_dev import TimedTournamentGames
@@ -18,8 +18,36 @@ class TimedTournamentWebSocketService(ResumableVerifiedTournamentWebSocketServic
         self.minutes = {}
         self.dispatch = asyncio.Lock()
 
+    async def _expire_lobby_heartbeats(self):
+        # Called only while the dispatch gate is held.
+        now = monotonic()
+
+        for ws, last_seen in list(self._lobby_heartbeats.items()):
+            member = self.membership.get(ws)
+            room = self.rooms.get(member[0]) if member else None
+
+            if (room is None or room.started
+                    or self.members.get(member[0], {}).get(member[1]) is not ws):
+                self._lobby_heartbeats.pop(ws, None)
+                continue
+
+            if now - last_seen < self.lobby_heartbeat_timeout:
+                continue
+
+            # Reuse the existing lobby reservation logic.
+            # Do not acquire the dispatch gate a second time.
+            await super().disconnect(ws)
+
+            task = asyncio.create_task(
+                self._close_replaced_socket(ws, 'Lobby heartbeat timeout')
+            )
+            self._replaced_socket_tasks.add(task)
+            task.add_done_callback(self._replaced_socket_tasks.discard)
+
     async def process(self, ws, data):
         async with self.dispatch:
+            await self._expire_lobby_heartbeats()
+            await self._expire_lobby_reservations()
             if isinstance(data, dict) and data.get('action') == 'tournament_create':
                 code = normalize_code(data.get('code'))
                 minutes = validate_minutes(data.get('time_minutes', 0))
@@ -31,6 +59,14 @@ class TimedTournamentWebSocketService(ResumableVerifiedTournamentWebSocketServic
                         if code not in self.rooms:
                             self.minutes.pop(code, None)
             return await super().process(ws, data)
+
+    def _forget_lobby(self, code):
+        super()._forget_lobby(code)
+        self.minutes.pop(code, None)
+
+    async def expire_lobby_reservations(self, now=None):
+        async with self.dispatch:
+            await self._expire_lobby_reservations(now)
 
     async def disconnect(self, ws):
         async with self.dispatch:
@@ -71,6 +107,8 @@ class TimedTournamentWebSocketService(ResumableVerifiedTournamentWebSocketServic
         draw_replays distinguishes successive games of the same pairing.
         """
         async with self.dispatch:
+            await self._expire_lobby_heartbeats()
+            await self._expire_lobby_reservations()
             packets = []
             async with self.lock:
                 for code, games in list(self.verified_games.items()):
