@@ -59,6 +59,9 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         if action == 'tournament_heartbeat':
             if ws in self._lobby_heartbeats:
                 self._lobby_heartbeats[ws] = monotonic()
+                await self.send(ws, {
+                    'action': 'tournament_heartbeat_ack'
+                })
             return
         if action == 'tournament_leave':
             return await self._leave_lobby(ws, data)
@@ -82,8 +85,13 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
                     self._lobby_heartbeats[ws] = monotonic()
         # Sent only to the registering player's connection; never broadcast.
         try:
-            await self.send(ws, {'action': 'tournament_resume_credentials',
-                                 'code': code, 'token': token})
+            credentials = {
+                'action': 'tournament_resume_credentials',
+                'code': code, 'token': token
+            }
+            if ws in self._lobby_heartbeats:
+                credentials['lobby_heartbeat'] = True
+            await self.send(ws, credentials)
         except websockets.exceptions.ConnectionClosed:
             pass
 
@@ -157,6 +165,8 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
                         game_states.append(games.state(match.match_id, player_id))
             reply = {'action': 'tournament_resumed', 'code': code,
                      'snapshot': room.snapshot(), 'game_states': game_states}
+            if ws in self._lobby_heartbeats:
+                reply['lobby_heartbeat'] = True
         try:
             await self.send(ws, reply)
         except websockets.exceptions.ConnectionClosed:

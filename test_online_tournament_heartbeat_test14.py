@@ -206,5 +206,125 @@ class LobbyHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(guest, self.svc._lobby_heartbeats)
 
 
+
+    async def test_heartbeat_negotiation(self):
+        host, _, _ = await self.register("AndroidHost", host=True)
+
+        legacy, _, _ = await self.register(
+            "WindowsGuest", heartbeat=False
+        )
+
+        self.assertIs(
+            host.packet("tournament_resume_credentials").get(
+                "lobby_heartbeat"
+            ), True
+        )
+
+        self.assertNotIn(
+            "lobby_heartbeat",
+            legacy.packet("tournament_resume_credentials")
+        )
+
+    async def test_heartbeat_ack_is_private(self):
+        host, _, _ = await self.register("Host", host=True)
+        guest, _, _ = await self.register("Guest")
+
+        before = len(guest.messages)
+
+        self.time += 10
+
+        await self.svc.process(host, {
+            "action": "tournament_heartbeat"
+        })
+
+        host.packet("tournament_heartbeat_ack")
+
+        self.assertEqual(len(guest.messages), before)
+        self.assertEqual(
+            self.svc._lobby_heartbeats[host], self.time
+        )
+
+    async def test_heartbeat_without_opt_in_is_ignored(self):
+        host, _, _ = await self.register("Host", host=True)
+
+        legacy, _, _ = await self.register(
+            "WindowsGuest", heartbeat=False
+        )
+
+        outsider = MockSocket()
+
+        before = self.svc._lobby_heartbeats[host]
+
+        for ws in (legacy, outsider):
+            await self.svc.process(ws, {
+                "action": "tournament_heartbeat"
+            })
+
+            self.assertNotIn(ws, self.svc._lobby_heartbeats)
+
+            self.assertFalse(any(
+                p.get("action") == "tournament_heartbeat_ack"
+                for p in ws.messages
+            ))
+
+        self.assertEqual(
+            self.svc._lobby_heartbeats[host], before
+        )
+
+    async def test_resume_renegotiates_heartbeat(self):
+        old, pid, token = await self.register("Host", host=True)
+
+        await self.advance(30)
+
+        new = await self.resume(pid, token)
+
+        self.assertIs(
+            new.packet("tournament_resumed").get(
+                "lobby_heartbeat"
+            ), True
+        )
+
+        self.assertNotIn(old, self.svc._lobby_heartbeats)
+
+        await self.svc.process(new, {
+            "action": "tournament_heartbeat"
+        })
+
+        new.packet("tournament_heartbeat_ack")
+
+    async def test_running_game_has_no_lobby_heartbeat(self):
+        host, pid, token = await self.register("Host", host=True)
+
+        for name in ("Guest1", "Guest2", "Guest3"):
+            await self.register(name)
+
+        await self.svc.process(host, {
+            "action": "tournament_start",
+            "code": self.code
+        })
+
+        await self.svc.poll_once()
+
+        self.assertFalse(self.svc._lobby_heartbeats)
+
+        await self.svc.disconnect(host)
+
+        new = await self.resume(pid, token)
+
+        self.assertNotIn(
+            "lobby_heartbeat",
+            new.packet("tournament_resumed")
+        )
+
+        await self.svc.process(new, {
+            "action": "tournament_heartbeat"
+        })
+
+        self.assertFalse(any(
+            p.get("action") == "tournament_heartbeat_ack"
+            for p in new.messages
+        ))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
