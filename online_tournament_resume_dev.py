@@ -44,6 +44,8 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         self._lobby_deadlines = {}
         self._replaced_socket_tasks = set()
         self.lobby_grace_seconds = 240
+        self.lobby_heartbeat_timeout = 30
+        self._lobby_heartbeats = {}
         self._resume_proofs = {}  # (code, server-issued player_id) -> SHA-256(token)
 
     @staticmethod
@@ -54,6 +56,10 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         if not isinstance(data, dict):
             return await super().process(ws, data)
         action = data.get('action')
+        if action == 'tournament_heartbeat':
+            if ws in self._lobby_heartbeats:
+                self._lobby_heartbeats[ws] = monotonic()
+            return
         if action == 'tournament_leave':
             return await self._leave_lobby(ws, data)
         if action == 'tournament_resume':
@@ -72,6 +78,8 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
             self._resume_proofs[(code, player_id)] = self._proof(token)
             if data.get('lobby_resume') is True:
                 self._lobby_resume_enabled.add((code, player_id))
+                if data.get('lobby_heartbeat') is True:
+                    self._lobby_heartbeats[ws] = monotonic()
         # Sent only to the registering player's connection; never broadcast.
         try:
             await self.send(ws, {'action': 'tournament_resume_credentials',
@@ -79,9 +87,9 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         except websockets.exceptions.ConnectionClosed:
             pass
 
-    async def _close_replaced_socket(self, ws):
+    async def _close_replaced_socket(self, ws, reason='Connection replaced'):
         try:
-            await ws.close(code=1000, reason='Connection replaced')
+            await ws.close(code=1000, reason=reason)
         except (websockets.exceptions.ConnectionClosed, OSError):
             pass
 
@@ -121,10 +129,15 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
                     raise PermissionError('Spieler ist bereits verbunden.')
 
                 self.membership.pop(replaced_ws, None)
+                self._lobby_heartbeats.pop(replaced_ws, None)
 
             self._lobby_deadlines.pop((code, player_id), None)
             self.members[code][player_id] = ws
             self.membership[ws] = (code, player_id)
+            if (not room.started
+                    and (code, player_id) in self._lobby_resume_enabled
+                    and data.get('lobby_heartbeat') is True):
+                self._lobby_heartbeats[ws] = monotonic()
 
             if replaced_ws is not None:
                 task = asyncio.create_task(
@@ -171,6 +184,7 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         ws = self.members[code].pop(player_id, None)
         if ws is not None:
             self.membership.pop(ws, None)
+            self._lobby_heartbeats.pop(ws, None)
 
         key = (code, player_id)
         self._resume_proofs.pop(key, None)
@@ -182,6 +196,7 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
 
             for peer in peers:
                 self.membership.pop(peer, None)
+                self._lobby_heartbeats.pop(peer, None)
 
             del self.rooms[code]
             del self.members[code]
@@ -265,6 +280,7 @@ class ResumableVerifiedTournamentWebSocketService(VerifiedTournamentWebSocketSer
         await self._expire_lobby_reservations(now)
 
     async def disconnect(self, ws):
+        self._lobby_heartbeats.pop(ws, None)
         prior = self.membership.get(ws)
         reserved = False
         async with self.lock:
